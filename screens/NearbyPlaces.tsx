@@ -7,8 +7,15 @@ import { Ionicons } from '@expo/vector-icons';
 import CustomAlert from '../components/CustomAlert';
 import { useNavigation } from '@react-navigation/native';
 import type { NativeStackNavigationProp } from '@react-navigation/native-stack';
-import { getNearbyPlaces, subscribePlaces, updateActivePlaceUsers, updateUserLocation } from '../services/placesService';
+import { getNearbyPlaces, subscribePlaces, updateActivePlaceUsers, updateUserLocation, ACTIVE_PLACE_KEY, LAST_CONFIRM_KEY } from '../services/placesService';
 import { onAuthStateChanged } from 'firebase/auth';
+import { setupPresence, updateUserPlace, subscribeToUserPresence } from '../services/presenceService';
+import { serverTimestamp } from 'firebase/database';
+import { ref, set, onValue } from 'firebase/database';
+import { database } from '../config/firebase';
+import AsyncStorage from '@react-native-async-storage/async-storage';
+import { doc, getDoc } from 'firebase/firestore';
+import { db } from '../config/firebase';
 
 const { width, height } = Dimensions.get('window');
 const ASPECT_RATIO = width / height;
@@ -382,12 +389,25 @@ export default function NearbyPlaces() {
           {
             text: 'Evet',
             onPress: async () => {
+              if (!auth.currentUser) return;
+
               try {
+                await updateUserPlace(auth.currentUser.uid, {
+                  id: nearbyPlaceToConfirm.id,
+                  name: nearbyPlaceToConfirm.name
+                });
+
+                // Firestore'da mekanın aktif kullanıcılar listesini güncelle
                 await updateActivePlaceUsers(
                   nearbyPlaceToConfirm.id,
-                  auth.currentUser!.uid,
+                  auth.currentUser.uid,
                   true
                 );
+
+                // AsyncStorage'a kaydet
+                await AsyncStorage.setItem(ACTIVE_PLACE_KEY, nearbyPlaceToConfirm.id);
+                await AsyncStorage.setItem(LAST_CONFIRM_KEY, Date.now().toString());
+
                 setHasConfirmedOnce(true);
                 setNearbyPlaceToConfirm(null);
               } catch (error) {
@@ -416,19 +436,113 @@ export default function NearbyPlaces() {
 
   // Auth state'ini dinle
   useEffect(() => {
-    const unsubscribe = onAuthStateChanged(auth, (user) => {
-      if (user) {
-        setCurrentUser({
-          photoURL: user.photoURL,
-          displayName: user.displayName
-        });
-      } else {
+    // Auth state değişikliklerini dinle
+    const unsubscribeAuth = onAuthStateChanged(auth, async (user) => {
+      if (!user) {
         setCurrentUser(null);
+        return;
       }
+
+      // Kullanıcı giriş yaptığında
+      setCurrentUser({
+        photoURL: user.photoURL,
+        displayName: user.displayName
+      });
+
+      // Presence sistemini başlat
+      const userStatusRef = setupPresence(user.uid);
+
+      // Mevcut konumu kullanarak mekan kontrolü yap
+      if (location) {
+        handleLocationUpdate(location);
+      }
+
+      return () => {
+        // Cleanup
+        set(userStatusRef, {
+          isOnline: false,
+          lastSeen: serverTimestamp()
+        });
+      };
     });
 
-    return () => unsubscribe();
+    return () => {
+      unsubscribeAuth();
+    };
+  }, [location]); // location'ı dependency olarak ekle
+
+  useEffect(() => {
+    if (auth.currentUser) {
+      // Kullanıcı presence sistemini başlat
+      const userStatusRef = setupPresence(auth.currentUser.uid);
+      
+      return () => {
+        // Cleanup
+        set(userStatusRef, {
+          isOnline: false,
+          lastSeen: serverTimestamp()
+        });
+      };
+    }
   }, []);
+
+  const handlePlaceConfirm = async (placeId: string, placeName: string) => {
+    if (!auth.currentUser) return;
+
+    try {
+      await updateUserPlace(auth.currentUser.uid, { id: placeId, name: placeName });
+      // ... diğer işlemler
+    } catch (error) {
+      console.error('Error updating place:', error);
+    }
+  };
+
+  const handlePlaceExit = async () => {
+    if (!auth.currentUser) return;
+
+    try {
+      await updateUserPlace(auth.currentUser.uid, null);
+      // ... diğer işlemler
+    } catch (error) {
+      console.error('Error exiting place:', error);
+    }
+  };
+
+  // Seçili mekanın aktif kullanıcılarını dinle
+  useEffect(() => {
+    if (selectedPlace) {
+      // RTDB'den aktif kullanıcıları al
+      const placeUsersRef = ref(database, `places/${selectedPlace.id}/activeUsers`);
+      const unsubscribe = onValue(placeUsersRef, async (snapshot) => {
+        const activeUserIds = snapshot.val() || {};
+        
+        // Her aktif kullanıcının detaylarını Firestore'dan al
+        const userPromises = Object.keys(activeUserIds).map(async (userId) => {
+          const userDoc = await getDoc(doc(db, 'users', userId));
+          const userData = userDoc.data();
+          return {
+            id: userId,
+            name: userData?.name || 'İsimsiz Kullanıcı',
+            photoURL: userData?.photoURL || '',
+            status: userData?.status || 'Merhaba! Mekanda kullanıyorum.',
+            lastSeen: new Date().toISOString(),
+            allowMessages: userData?.allowMessages ?? true,
+            isOnline: true
+          };
+        });
+
+        const activeUsers = await Promise.all(userPromises);
+        
+        // Mekan bilgilerini güncelle
+        setSelectedPlace(prev => prev ? {
+          ...prev,
+          users: activeUsers
+        } : null);
+      });
+
+      return () => unsubscribe();
+    }
+  }, [selectedPlace?.id]);
 
   if (!location) {
     return (

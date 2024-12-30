@@ -79,7 +79,6 @@ export default function SignUpScreen() {
         status: 'Merhaba! Mekanda kullanıyorum.',
         lastSeen: new Date().toISOString(),
         allowMessages: true,
-        isOnline: true,
       });
 
       Alert.alert('Başarılı', 'Hesabınız oluşturuldu', [

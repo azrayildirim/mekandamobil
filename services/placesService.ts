@@ -1,5 +1,6 @@
 import { collection, getDocs, query, where, GeoPoint, DocumentData, addDoc, onSnapshot, doc, getDoc, updateDoc } from 'firebase/firestore';
-import { db } from '../config/firebase';
+import { ref, get, set, serverTimestamp } from 'firebase/database';
+import { db, database } from '../config/firebase';
 import { Place, Review, User } from '../types';
 import AsyncStorage from '@react-native-async-storage/async-storage';
 
@@ -83,19 +84,18 @@ export const subscribePlaces = (
 
 export const getPlaceDetails = async (placeId: string) => {
   try {
-    const placeRef = collection(db, PLACES_COLLECTION);
-    const q = query(placeRef, where("id", "==", placeId));
-    const querySnapshot = await getDocs(q);
-    
-    if (querySnapshot.empty) {
-      throw new Error('Place not found');
-    }
+    const placeDoc = await getDoc(doc(db, 'places', placeId));
+    if (!placeDoc.exists()) throw new Error('Place not found');
 
-    const placeData = querySnapshot.docs[0].data();
+    // Aktif kullanıcıları RTDB'den al
+    const activeUsersSnapshot = await get(ref(database, `places/${placeId}/activeUsers`));
+    const activeUsers = activeUsersSnapshot.val() || {};
+
     return {
-      id: querySnapshot.docs[0].id,
-      ...placeData
-    } as Place;
+      id: placeDoc.id,
+      ...placeDoc.data(),
+      activeUsers: Object.values(activeUsers)
+    };
   } catch (error) {
     console.error('Error fetching place details:', error);
     throw error;
@@ -104,51 +104,16 @@ export const getPlaceDetails = async (placeId: string) => {
 
 export const updateActivePlaceUsers = async (placeId: string, userId: string, isEntering: boolean) => {
   try {
-    const placeRef = doc(db, PLACES_COLLECTION, placeId);
-    const placeDoc = await getDoc(placeRef);
+    const userStatusRef = ref(database, `places/${placeId}/activeUsers/${userId}`);
     
-    if (!placeDoc.exists()) {
-      throw new Error('Place not found');
-    }
-
-    // Kullanıcı bilgilerini al
-    const userRef = doc(db, 'users', userId);
-    const userDoc = await getDoc(userRef);
-    const userData = userDoc.data();
-
-    const currentUsers = placeDoc.data().activeUsers || [];
-    let updatedUsers = [];
-
     if (isEntering) {
-      // Kullanıcı bilgilerini ekle
-      const userInfo = {
+      await set(userStatusRef, {
         id: userId,
-        name: userData?.name || 'İsimsiz Kullanıcı',
-        photoURL: userData?.photoURL || '',
-        status: userData?.status || 'Merhaba! Mekanda kullanıyorum.',
-        lastSeen: new Date().toISOString(),
-        allowMessages: userData?.allowMessages ?? true,
-        isOnline: true
-      };
-      
-      // Eğer kullanıcı zaten listede yoksa ekle
-      if (!currentUsers.find((u: any) => u.id === userId)) {
-        updatedUsers = [...currentUsers, userInfo];
-      } else {
-        updatedUsers = currentUsers;
-      }
-
-      // Mekan girişi onaylandığında localStorage'ı güncelle
-      await AsyncStorage.setItem(ACTIVE_PLACE_KEY, placeId);
-      await AsyncStorage.setItem(LAST_CONFIRM_KEY, Date.now().toString());
+        timestamp: serverTimestamp()
+      });
     } else {
-      // Kullanıcıyı listeden çıkar
-      updatedUsers = currentUsers.filter((user: any) => user.id !== userId);
+      await set(userStatusRef, null);
     }
-
-    await updateDoc(placeRef, {
-      activeUsers: updatedUsers
-    });
   } catch (error) {
     console.error('Error updating active users:', error);
     throw error;
